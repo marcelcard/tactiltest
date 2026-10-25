@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Prueba táctil 10×10</title>
+<style>
+  :root { --azul:#1560d8; --verde:#16a34a; --rojo:#dc2626; --naranja:#ea8a00; --linea:#c9ced6; --txt:#111; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; overflow:hidden; background:#fff; color:var(--txt);
+    font:14px/1.3 "Segoe UI", system-ui, sans-serif; -webkit-user-select:none; user-select:none; }
+  #bar { height:56px; display:flex; align-items:center; gap:8px; padding:0 14px; border-bottom:1px solid var(--linea); background:#fff; }
+  #bar h1 { font-size:18px; margin:0 12px 0 0; font-weight:700; }
+  #bar button { height:38px; padding:0 16px; border:1px solid var(--linea); background:#f4f6f9; border-radius:6px; font:inherit; cursor:pointer; }
+  #bar button.on { background:var(--azul); border-color:var(--azul); color:#fff; }
+  #bar .sp { flex:1; }
+  #estado { color:#444; font-variant-numeric:tabular-nums; }
+  #cv { display:block; width:100%; height:calc(100% - 56px); touch-action:none; cursor:crosshair; }
+  #rep { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; }
+  #rep.open { display:flex; }
+  #rep .box { background:#fff; width:min(860px,92vw); max-height:88vh; border-radius:10px; padding:18px; display:flex; flex-direction:column; gap:12px; }
+  #rep pre { margin:0; overflow:auto; flex:1; background:#f4f6f9; padding:12px; border-radius:6px; font:13px/1.45 Consolas, monospace; -webkit-user-select:text; user-select:text; white-space:pre-wrap; }
+  #rep .acc { display:flex; gap:8px; justify-content:flex-end; }
+  #rep button { height:38px; padding:0 16px; border:1px solid var(--linea); background:#f4f6f9; border-radius:6px; font:inherit; cursor:pointer; }
+  button:focus-visible { outline:3px solid #7aa7f5; outline-offset:2px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <h1>Prueba táctil</h1>
+  <button data-m="points" class="on">1 · Puntos</button>
+  <button data-m="lines">2 · Líneas</button>
+  <button data-m="multi">3 · Multitoque</button>
+  <button data-m="edges">4 · Bordes</button>
+  <span class="sp"></span>
+  <span id="estado"></span>
+  <button id="bReset">Reiniciar (R)</button>
+  <button id="bRep">Reporte</button>
+  <button id="bFs">Pantalla completa (F)</button>
+</div>
+<canvas id="cv"></canvas>
+
+<div id="rep"><div class="box">
+  <pre id="repTxt"></pre>
+  <div class="acc"><button id="bJson">Descargar JSON</button><button id="bCerrar">Cerrar</button></div>
+</div></div>
+
+<script>
+"use strict";
+const N = 10;               // cuadrícula N×N
+const R_PUNTO = 44;         // radio de acierto (px) alrededor del centro del punto
+const TOL = 34;             // tolerancia al recorrer una línea (px)
+const SEG = 18;             // largo aproximado de cada segmento de línea (px)
+const SALTO = 110;          // salto entre muestras consecutivas que se considera sospechoso (px)
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let W = 0, H = 0, mode = 'points';
+let S = nuevoEstado();
+
+function nuevoEstado() {
+  return { hits: Array(N * N).fill(null), lines: [], edges: [], touches: new Map(), maxT: 0,
+           jumps: [], cancels: [], trails: [], extra: 0 };
+}
+
+/* ---------- geometría ---------- */
+function resize() {
+  const dpr = window.devicePixelRatio || 1, r = cv.getBoundingClientRect();
+  W = r.width; H = r.height;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  buildLines(); draw();
+}
+const centro = (i, j) => ({ x: (j + .5) * W / N, y: (i + .5) * H / N });
+const num = (i, j) => i * N + j + 1;
+
+function buildLines() {
+  const m = 6, L = [];
+  for (let i = 0; i < N; i++) L.push(mk(`Fila ${i + 1}`, m, centro(i, 0).y, W - m, centro(i, 0).y));
+  for (let j = 0; j < N; j++) L.push(mk(`Columna ${j + 1}`, centro(0, j).x, m, centro(0, j).x, H - m));
+  L.push(mk('Diagonal ↘', m, m, W - m, H - m));
+  L.push(mk('Diagonal ↙', W - m, m, m, H - m));
+  S.lines = L;
+  const ins = 26, P = [], old = S.edges || [];
+  for (let j = 0; j < N; j++) P.push([`Superior ${j + 1}`, centro(0, j).x, ins]);
+  for (let i = 0; i < N; i++) P.push([`Derecho ${i + 1}`, W - ins, centro(i, 0).y]);
+  for (let j = N - 1; j >= 0; j--) P.push([`Inferior ${j + 1}`, centro(0, j).x, H - ins]);
+  for (let i = N - 1; i >= 0; i--) P.push([`Izquierdo ${i + 1}`, ins, centro(i, 0).y]);
+  P.push(['Esquina sup-izq', ins, ins], ['Esquina sup-der', W - ins, ins], ['Esquina inf-der', W - ins, H - ins], ['Esquina inf-izq', ins, H - ins]);
+  S.edges = P.map((q, k) => ({ name: q[0], x: q[1], y: q[2], hit: old[k] ? old[k].hit : null }));
+}
+function mk(name, x1, y1, x2, y2) {
+  const len = Math.hypot(x2 - x1, y2 - y1), n = Math.max(2, Math.ceil(len / SEG));
+  return { name, x1, y1, x2, y2, len, n, cov: new Uint8Array(n) };
+}
+
+/* ---------- registro de muestras ---------- */
+function marcarLinea(p) {
+  for (const l of S.lines) {
+    const dx = l.x2 - l.x1, dy = l.y2 - l.y1;
+    let t = ((p.x - l.x1) * dx + (p.y - l.y1) * dy) / (l.len * l.len);
+    t = Math.min(1, Math.max(0, t));
+    const d = Math.hypot(p.x - (l.x1 + t * dx), p.y - (l.y1 + t * dy));
+    if (d > TOL) continue;
+    const alcance = Math.sqrt(TOL * TOL - d * d) / (l.len / l.n);
+    const k = t * (l.n - 1);
+    for (let s = Math.max(0, Math.ceil(k - alcance)); s <= Math.min(l.n - 1, Math.floor(k + alcance)); s++) l.cov[s] = 1;
+  }
+}
+function alAbajo(p, e) {
+  if (mode === 'edges') {
+    for (const q of S.edges) {
+      const d = Math.hypot(p.x - q.x, p.y - q.y);
+      if (d <= R_PUNTO) q.hit = { dx: +(p.x - q.x).toFixed(1), dy: +(p.y - q.y).toFixed(1) };
+    }
+    return;
+  }
+  if (mode !== 'points') { if (mode === 'lines') marcarLinea(p); return; }
+  const i = Math.floor(p.y / (H / N)), j = Math.floor(p.x / (W / N));
+  if (i < 0 || j < 0 || i >= N || j >= N) return;
+  const c = centro(i, j), d = Math.hypot(p.x - c.x, p.y - c.y);
+  if (d <= R_PUNTO) S.hits[i * N + j] = { dx: +(p.x - c.x).toFixed(1), dy: +(p.y - c.y).toFixed(1), t: Date.now(), tipo: e.pointerType };
+  else S.extra++;
+}
+const pos = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  const p = pos(e);
+  S.touches.set(e.pointerId, { id: e.pointerId, tipo: e.pointerType, last: p, trail: [p] });
+  S.maxT = Math.max(S.maxT, S.touches.size);
+  alAbajo(p, e); draw();
+});
+cv.addEventListener('pointermove', e => {
+  const t = S.touches.get(e.pointerId); if (!t) return;
+  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  for (const ev of (evs.length ? evs : [e])) {
+    const p = pos(ev);
+    if (Math.hypot(p.x - t.last.x, p.y - t.last.y) > SALTO && mode !== 'points') S.jumps.push({ a: t.last, b: p });
+    if (mode === 'lines') marcarLinea(p);
+    t.trail.push(p); if (t.trail.length > 600) t.trail.shift();
+    t.last = p;
+  }
+  draw();
+});
+function fin(e) {
+  const t = S.touches.get(e.pointerId); if (!t) return;
+  if (e.type === 'pointercancel') S.cancels.push({ ...t.last });
+  S.trails.push(t.trail); if (S.trails.length > 40) S.trails.shift();
+  S.touches.delete(e.pointerId); draw();
+}
+cv.addEventListener('pointerup', fin);
+cv.addEventListener('pointercancel', fin);
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ---------- dibujo ---------- */
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  grilla();
+  if (mode === 'points') dibujarPuntos();
+  if (mode === 'lines') dibujarLineas();
+  if (mode === 'multi') dibujarMulti();
+  if (mode === 'edges') dibujarBordes();
+  estado();
+}
+function grilla() {
+  ctx.strokeStyle = '#d5d9e0'; ctx.lineWidth = 1; ctx.beginPath();
+  for (let k = 1; k < N; k++) {
+    ctx.moveTo(Math.round(k * W / N) + .5, 0); ctx.lineTo(Math.round(k * W / N) + .5, H);
+    ctx.moveTo(0, Math.round(k * H / N) + .5); ctx.lineTo(W, Math.round(k * H / N) + .5);
+  }
+  ctx.stroke();
+}
+function dibujarPuntos() {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '600 15px "Segoe UI", sans-serif';
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const c = centro(i, j), h = S.hits[i * N + j];
+    ctx.beginPath(); ctx.arc(c.x, c.y, 15, 0, 7);
+    ctx.fillStyle = h ? '#16a34a' : '#1560d8'; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.fillText(num(i, j), c.x, c.y + 1);
+    if (h) { // posición real registrada por el monitor
+      ctx.beginPath(); ctx.arc(c.x + h.dx, c.y + h.dy, 4, 0, 7); ctx.fillStyle = '#111'; ctx.fill();
+    }
+  }
+}
+function dibujarBordes() {
+  for (const q of S.edges) {
+    ctx.beginPath(); ctx.arc(q.x, q.y, 15, 0, 7);
+    ctx.fillStyle = q.hit ? '#16a34a' : '#1560d8'; ctx.fill();
+    if (q.hit) { ctx.beginPath(); ctx.arc(q.x + q.hit.dx, q.y + q.hit.dy, 4, 0, 7); ctx.fillStyle = '#111'; ctx.fill(); }
+  }
+  ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '600 20px "Segoe UI", sans-serif';
+  ctx.fillText('Toca todos los puntos del borde, incluidas las 4 esquinas', W / 2, H / 2);
+}
+function dibujarLineas() {
+  for (const l of S.lines) {
+    const sl = l.len / l.n, dx = (l.x2 - l.x1) / l.len, dy = (l.y2 - l.y1) / l.len;
+    const idx = [...l.cov.keys()].filter(k => l.cov[k]);
+    const a = idx.length ? idx[0] : -1, b = idx.length ? idx[idx.length - 1] : -1;
+    for (let k = 0; k < l.n; k++) {
+      const hueco = a >= 0 && k > a && k < b && !l.cov[k];
+      ctx.strokeStyle = l.cov[k] ? '#16a34a' : hueco ? '#dc2626' : '#aeb6c2';
+      ctx.lineWidth = l.cov[k] || hueco ? 5 : 1.5;
+      ctx.beginPath();
+      ctx.moveTo(l.x1 + dx * sl * k, l.y1 + dy * sl * k);
+      ctx.lineTo(l.x1 + dx * sl * (k + 1), l.y1 + dy * sl * (k + 1));
+      ctx.stroke();
+    }
+  }
+  ctx.lineWidth = 3; ctx.strokeStyle = '#ea8a00';
+  for (const j of S.jumps) { ctx.beginPath(); ctx.moveTo(j.a.x, j.a.y); ctx.lineTo(j.b.x, j.b.y); ctx.stroke(); }
+  ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 4;
+  for (const c of S.cancels) { ctx.beginPath(); ctx.moveTo(c.x - 12, c.y - 12); ctx.lineTo(c.x + 12, c.y + 12); ctx.moveTo(c.x + 12, c.y - 12); ctx.lineTo(c.x - 12, c.y + 12); ctx.stroke(); }
+}
+function dibujarMulti() {
+  ctx.lineWidth = 3; ctx.lineJoin = 'round';
+  const trazo = (tr, col) => { if (tr.length < 2) return; ctx.strokeStyle = col; ctx.beginPath(); ctx.moveTo(tr[0].x, tr[0].y); for (const p of tr) ctx.lineTo(p.x, p.y); ctx.stroke(); };
+  S.trails.forEach(tr => trazo(tr, '#b7c4dd'));
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '700 22px "Segoe UI", sans-serif';
+  let k = 0;
+  for (const t of S.touches.values()) {
+    k++; trazo(t.trail, '#1560d8');
+    ctx.beginPath(); ctx.arc(t.last.x, t.last.y, 34, 0, 7); ctx.fillStyle = 'rgba(21,96,216,.25)'; ctx.fill();
+    ctx.strokeStyle = '#1560d8'; ctx.stroke();
+    ctx.fillStyle = '#111'; ctx.fillText(k, t.last.x, t.last.y);
+  }
+  ctx.textAlign = 'left'; ctx.font = '700 64px "Segoe UI", sans-serif'; ctx.fillStyle = '#111';
+  ctx.fillText(`${S.touches.size} ahora · ${S.maxT} máx`, 30, 70);
+}
+function estado() {
+  let s = '';
+  if (mode === 'points') s = `Puntos ${S.hits.filter(Boolean).length}/${N * N}`;
+  if (mode === 'lines') {
+    const ok = S.lines.filter(l => cobertura(l) >= .98).length;
+    s = `Líneas completas ${ok}/${S.lines.length} · saltos ${S.jumps.length} · cortes ${S.cancels.length}`;
+  }
+  if (mode === 'multi') s = `Toques simultáneos máx: ${S.maxT}`;
+  if (mode === 'edges') s = `Bordes ${S.edges.filter(q => q.hit).length}/${S.edges.length}`;
+  $('estado').textContent = s;
+}
+const cobertura = l => l.cov.reduce((a, b) => a + b, 0) / l.n;
+const huecos = l => { const idx = [...l.cov.keys()].filter(k => l.cov[k]); if (!idx.length) return 0;
+  let h = 0; for (let k = idx[0]; k <= idx[idx.length - 1]; k++) if (!l.cov[k]) h++; return h; };
+
+/* ---------- reporte ---------- */
+function veredicto(d) {
+  const tot = (pr, t) => pr === 0 ? 'SIN PROBAR' : pr < t ? 'INCOMPLETO' : 'APROBADO';
+  const v = { puntos: tot(d.puntos.probados, d.puntos.total), bordes: tot(d.bordes.probados, d.bordes.total) };
+  const pr = d.lineas.filter(l => l.cobertura > 0);
+  v.lineas = !pr.length ? 'SIN PROBAR'
+    : pr.some(l => l.segmentosConHueco > 0 || l.cobertura < 98) ? 'FALLA'
+    : pr.length < d.lineas.length ? 'INCOMPLETO' : 'APROBADO';
+  const t = Object.values(v);
+  v.general = t.every(x => x === 'APROBADO') ? 'APROBADO' : t.includes('FALLA') ? 'FALLA' : 'INCOMPLETO';
+  return v;
+}
+function datos() {
+  const falt = [], desv = [];
+  S.hits.forEach((h, k) => { if (!h) falt.push(k + 1); else if (Math.hypot(h.dx, h.dy) > 30) desv.push({ punto: k + 1, dx: h.dx, dy: h.dy }); });
+  const offs = S.hits.filter(Boolean).map(h => Math.hypot(h.dx, h.dy));
+  const d = {
+    fecha: new Date().toISOString(),
+    pantalla: { ventana: `${innerWidth}×${innerHeight}`, pantalla: `${screen.width}×${screen.height}`, dpr: devicePixelRatio, maxTouchPoints: navigator.maxTouchPoints, agente: navigator.userAgent },
+    puntos: { probados: offs.length, total: N * N, sinRespuesta: falt, desviacionMediaPx: offs.length ? +(offs.reduce((a, b) => a + b, 0) / offs.length).toFixed(1) : null, conDesviacionMayor30px: desv, toquesFueraDePunto: S.extra },
+    lineas: S.lines.map(l => ({ linea: l.name, cobertura: Math.round(cobertura(l) * 100), segmentosConHueco: huecos(l) })),
+    bordes: { probados: S.edges.filter(q => q.hit).length, total: S.edges.length, sinRespuesta: S.edges.filter(q => !q.hit).map(q => q.name) },
+    saltos: S.jumps.length, cortes: S.cancels.length, maxToquesSimultaneos: S.maxT
+  };
+  d.veredicto = veredicto(d);
+  return d;
+}
+function textoReporte(d) {
+  const L = [];
+  const v = d.veredicto;
+  L.push('REPORTE DE PRUEBA TÁCTIL', d.fecha, '', `RESULTADO GENERAL: ${v.general}`,
+    `  Puntos: ${v.puntos} · Líneas: ${v.lineas} · Bordes: ${v.bordes}`,
+    '  (el multitoque no entra en el resultado: compara el máximo con la ficha técnica del monitor)', '',
+    `Ventana ${d.pantalla.ventana} · pantalla ${d.pantalla.pantalla} · escala ${d.pantalla.dpr} · maxTouchPoints ${d.pantalla.maxTouchPoints}`, '');
+  L.push(`PUNTOS: ${d.puntos.probados}/${d.puntos.total} probados`);
+  L.push(d.puntos.sinRespuesta.length ? `  Sin probar o sin respuesta: ${d.puntos.sinRespuesta.join(', ')}` : '  Todos respondieron.');
+  if (d.puntos.desviacionMediaPx !== null) L.push(`  Desviación media: ${d.puntos.desviacionMediaPx} px`);
+  if (d.puntos.conDesviacionMayor30px.length) L.push('  Desviación > 30 px: ' + d.puntos.conDesviacionMayor30px.map(x => `#${x.punto} (${x.dx},${x.dy})`).join('  '));
+  L.push('', 'LÍNEAS:');
+  const probadas = d.lineas.filter(l => l.cobertura > 0);
+  if (!probadas.length) L.push('  (no se probó ninguna)');
+  probadas.forEach(l => L.push(`  ${l.linea}: ${l.cobertura}%${l.segmentosConHueco ? `  ← ${l.segmentosConHueco} segmentos sin respuesta` : ''}`));
+  L.push('', `BORDES Y ESQUINAS: ${d.bordes.probados}/${d.bordes.total} probados`);
+  if (d.bordes.probados && d.bordes.sinRespuesta.length) L.push('  Sin respuesta: ' + d.bordes.sinRespuesta.join(', '));
+  L.push('', `Saltos grandes entre muestras: ${d.saltos}`, `Toques cortados (pointercancel): ${d.cortes}`, `Máx. toques simultáneos: ${d.maxToquesSimultaneos}`);
+  return L.join('\n');
+}
+function abrirReporte() { $('repTxt').textContent = textoReporte(datos()); $('rep').classList.add('open'); }
+$('bRep').onclick = abrirReporte;
+$('bCerrar').onclick = () => $('rep').classList.remove('open');
+$('bJson').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(datos(), null, 2)], { type: 'application/json' }));
+  a.download = 'reporte-tactil.json'; a.click(); URL.revokeObjectURL(a.href);
+};
+
+/* ---------- controles ---------- */
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll('[data-m]').forEach(b => b.classList.toggle('on', b.dataset.m === m));
+  draw();
+}
+document.querySelectorAll('[data-m]').forEach(b => b.onclick = () => setMode(b.dataset.m));
+function reset() { S = nuevoEstado(); buildLines(); draw(); }
+const fs = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+$('bReset').onclick = reset; $('bFs').onclick = fs;
+addEventListener('keydown', e => {
+  if (e.key === '1') setMode('points'); if (e.key === '2') setMode('lines'); if (e.key === '3') setMode('multi'); if (e.key === '4') setMode('edges');
+  if (e.key.toLowerCase() === 'r') reset(); if (e.key.toLowerCase() === 'f') fs();
+});
+addEventListener('resize', resize);
+resize();
+</script>
+</body>
+</html>
